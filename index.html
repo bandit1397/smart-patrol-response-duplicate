@@ -92,8 +92,6 @@
   <button id="navigateBtn" onclick="navigateToPatrol()" style="flex:1; background:#007bff; color:white; border:none; padding:10px; border-radius:5px; font-size:14px; cursor:pointer;">📍 길찾기</button>
   </div>
 
-  <button id="exportDeletedBtn" onclick="exportDeletedEntryPoints()" style="background:#6c757d; color:white; border:none; padding:8px; border-radius:5px; font-size:14px; cursor:pointer; width:90%; max-width:350px; margin:5px auto; display:block;">🗑 삭제된 진입기준점 목록 복사</button>
-
   <button id="hidePanelBtn" onclick="togglePanel()">🔽 패널 숨기기</button>
 
   <!-- 로그 textarea -->
@@ -134,34 +132,8 @@ let highlightedGpxWpts = []; // 검색으로 색상 변경된 wpt 마커들 (원
 let gpxNewWptLayerGroup;   // ✅ 새로 만든 WPT 마커만 모아두는 레이어
 let gpxNewWptIndex = [];   // ✅ 검색/색변화는 이 인덱스만 사용
 
-// ✅ [진입기준점] wpt 전용: 항상 지도에 표시 + 우클릭(비밀번호)으로 임시 삭제
-const ENTRY_POINT_DELETE_PASSWORD = "knp123";
-const ENTRY_POINT_STORAGE_KEY = "galsan_deletedEntryPoints";
+// ✅ [진입기준점] wpt 전용: 도로 진입 기준점을 항상 지도에 표시
 let entryPointLayerGroup;
-
-function entryPointKey(name, lat, lon) {
-  return `${name}|${lat.toFixed(6)},${lon.toFixed(6)}`;
-}
-function getDeletedEntryPointKeys() {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(ENTRY_POINT_STORAGE_KEY) || "[]"));
-  } catch (e) {
-    return new Set();
-  }
-}
-function markEntryPointDeleted(name, lat, lon) {
-  const keys = getDeletedEntryPointKeys();
-  keys.add(entryPointKey(name, lat, lon));
-  localStorage.setItem(ENTRY_POINT_STORAGE_KEY, JSON.stringify([...keys]));
-}
-function exportDeletedEntryPoints() {
-  const keys = [...getDeletedEntryPointKeys()];
-  if (keys.length === 0) { alert("삭제된 진입기준점이 없습니다."); return; }
-  const text = keys.join("\n");
-  navigator.clipboard.writeText(text)
-    .then(() => alert(`✅ 삭제된 진입기준점 ${keys.length}개 목록이 복사되었습니다.\n\n${text}`))
-    .catch(() => alert(`복사 실패. 목록:\n\n${text}`));
-}
 
 function setActiveCategories(selectedCategories){
   activeCategories = selectedCategories.filter(cat => patrolSchedules.hasOwnProperty(cat));
@@ -518,26 +490,14 @@ function initMap(){
             const latNum = Number(lat);
             const lonNum = Number(lon);
 
-            // ✅ [진입기준점] wpt: 항상 표시되는 초록 마커, 우클릭+비밀번호로 임시 삭제(로컬 저장)
+            // ✅ [진입기준점] wpt: 도로 진입 기준점, 항상 표시되는 초록 마커
             if (name.startsWith("[진입기준점]")) {
-              if (getDeletedEntryPointKeys().has(entryPointKey(name, latNum, lonNum))) return;
-
               const entryIcon = L.icon({
                 iconUrl: "https://maps.google.com/mapfiles/ms/icons/green-dot.png",
                 iconSize: [32, 32]
               });
               const entryMarker = L.marker([latNum, lonNum], { icon: entryIcon });
               entryMarker.bindTooltip(name, { direction: "top", offset: [0, -8] });
-
-              entryMarker.on("contextmenu", (e) => {
-                e.originalEvent.preventDefault();
-                const pw = prompt(`"${name}" 삭제하려면 비밀번호를 입력하세요:`);
-                if (pw === null) return;
-                if (pw !== ENTRY_POINT_DELETE_PASSWORD) { alert("비밀번호가 올바르지 않습니다."); return; }
-                entryPointLayerGroup.removeLayer(entryMarker);
-                markEntryPointDeleted(name, latNum, lonNum);
-              });
-
               entryMarker.addTo(entryPointLayerGroup);
               return;
             }
