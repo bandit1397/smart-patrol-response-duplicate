@@ -139,7 +139,11 @@ let entryPointLayerGroup;
 let galsanGraph = null;        // { nodes: [{lat,lon}], adj: [[{to,dist}]] } — trkpt 기반 경로망
 let galsanEntryNodeIds = [];   // 진입기준점 wpt와 대응하는 galsanGraph 노드 인덱스들
 let galsanRouteLine = null;    // 현재 표시 중인 경로 폴리라인
-const GALSAN_SNAP_METERS = 15; // 서로 다른 트랙이라도 이 거리 이내면 같은 교차로로 보고 연결
+
+// 같은 교차로가 GPS 오차로 살짝 다르게 찍힌 경우만 "같은 지점"으로 봄 (이 이상은 서로 다른 길일 수 있어 연결하지 않음)
+const GALSAN_TIGHT_SNAP_METERS = 6;
+// 그래도 트랙이 끊어져 있으면(고립된 트랙), 네트워크에 붙이기 위한 최소 연결 시도 상한선
+const GALSAN_MAX_BRIDGE_METERS = 60;
 
 function haversineM(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -153,6 +157,10 @@ function haversineM(lat1, lon1, lat2, lon2) {
 function buildGalsanGraph(xml) {
   const nodes = [];
   const adj = [];
+  const parent = []; // union-find: 몇 개의 트랙이 실제로 이어져 있는지 추적
+
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  function union(a, b) { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; }
 
   Array.from(xml.getElementsByTagName("trk")).forEach(trkEl => {
     let prevIdx = null;
@@ -162,25 +170,43 @@ function buildGalsanGraph(xml) {
       const idx = nodes.length;
       nodes.push({ lat, lon });
       adj.push([]);
+      parent.push(idx);
       if (prevIdx !== null) {
         const d = haversineM(nodes[prevIdx].lat, nodes[prevIdx].lon, lat, lon);
-        adj[prevIdx].push({ to: idx, dist: d });
-        adj[idx].push({ to: prevIdx, dist: d });
+        adj[prevIdx].push({ to: idx, dist: d, cross: false });
+        adj[idx].push({ to: prevIdx, dist: d, cross: false });
+        union(prevIdx, idx);
       }
       prevIdx = idx;
     });
   });
 
-  // ✅ 서로 다른 트랙이라도 실제로는 같은 교차로인 경우가 많아, 가까운 지점끼리 연결
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
+  const n = nodes.length;
+
+  // ✅ 1) 아주 가까운(같은 교차로로 볼 수 있는) 지점끼리만 우선 연결
+  const bridgeCandidates = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
       const d = haversineM(nodes[i].lat, nodes[i].lon, nodes[j].lat, nodes[j].lon);
-      if (d <= GALSAN_SNAP_METERS) {
-        adj[i].push({ to: j, dist: d });
-        adj[j].push({ to: i, dist: d });
+      if (d <= GALSAN_TIGHT_SNAP_METERS) {
+        adj[i].push({ to: j, dist: d, cross: true });
+        adj[j].push({ to: i, dist: d, cross: true });
+        union(i, j);
+      } else if (d <= GALSAN_MAX_BRIDGE_METERS) {
+        bridgeCandidates.push({ i, j, d });
       }
     }
   }
+
+  // ✅ 2) 그래도 나머지 네트워크와 끊어진 트랙이 있다면, 가장 가까운 지점 하나로만 최소 연결
+  bridgeCandidates.sort((a, b) => a.d - b.d);
+  bridgeCandidates.forEach(({ i, j, d }) => {
+    if (find(i) !== find(j)) {
+      adj[i].push({ to: j, dist: d, cross: true });
+      adj[j].push({ to: i, dist: d, cross: true });
+      union(i, j);
+    }
+  });
 
   return { nodes, adj };
 }
