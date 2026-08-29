@@ -135,6 +135,110 @@ let gpxNewWptIndex = [];   // ✅ 검색/색변화는 이 인덱스만 사용
 // ✅ [진입기준점] wpt 전용: 도로 진입 기준점을 항상 지도에 표시
 let entryPointLayerGroup;
 
+// ✅ 갈산공원 wpt 클릭 시 "가장 가까운 진입기준점 → 클릭한 wpt" 트랙 경로를 파란선으로 표시
+let galsanGraph = null;        // { nodes: [{lat,lon}], adj: [[{to,dist}]] } — trkpt 기반 경로망
+let galsanEntryNodeIds = [];   // 진입기준점 wpt와 대응하는 galsanGraph 노드 인덱스들
+let galsanRouteLine = null;    // 현재 표시 중인 경로 폴리라인
+const GALSAN_SNAP_METERS = 15; // 서로 다른 트랙이라도 이 거리 이내면 같은 교차로로 보고 연결
+
+function haversineM(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+  const dphi = (lat2 - lat1) * Math.PI / 180;
+  const dlambda = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dphi / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dlambda / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function buildGalsanGraph(xml) {
+  const nodes = [];
+  const adj = [];
+
+  Array.from(xml.getElementsByTagName("trk")).forEach(trkEl => {
+    let prevIdx = null;
+    Array.from(trkEl.getElementsByTagName("trkpt")).forEach(tp => {
+      const lat = Number(tp.getAttribute("lat"));
+      const lon = Number(tp.getAttribute("lon"));
+      const idx = nodes.length;
+      nodes.push({ lat, lon });
+      adj.push([]);
+      if (prevIdx !== null) {
+        const d = haversineM(nodes[prevIdx].lat, nodes[prevIdx].lon, lat, lon);
+        adj[prevIdx].push({ to: idx, dist: d });
+        adj[idx].push({ to: prevIdx, dist: d });
+      }
+      prevIdx = idx;
+    });
+  });
+
+  // ✅ 서로 다른 트랙이라도 실제로는 같은 교차로인 경우가 많아, 가까운 지점끼리 연결
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const d = haversineM(nodes[i].lat, nodes[i].lon, nodes[j].lat, nodes[j].lon);
+      if (d <= GALSAN_SNAP_METERS) {
+        adj[i].push({ to: j, dist: d });
+        adj[j].push({ to: i, dist: d });
+      }
+    }
+  }
+
+  return { nodes, adj };
+}
+
+function galsanNearestNode(lat, lon) {
+  if (!galsanGraph) return -1;
+  let best = -1, bestD = Infinity;
+  galsanGraph.nodes.forEach((n, i) => {
+    const d = haversineM(lat, lon, n.lat, n.lon);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+function galsanDijkstraFromEntryPoints() {
+  const n = galsanGraph.nodes.length;
+  const dist = new Array(n).fill(Infinity);
+  const prev = new Array(n).fill(-1);
+  const visited = new Array(n).fill(false);
+  galsanEntryNodeIds.forEach(s => { dist[s] = 0; });
+
+  for (let iter = 0; iter < n; iter++) {
+    let u = -1, best = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; }
+    }
+    if (u === -1) break;
+    visited[u] = true;
+    galsanGraph.adj[u].forEach(({ to, dist: w }) => {
+      if (dist[u] + w < dist[to]) {
+        dist[to] = dist[u] + w;
+        prev[to] = u;
+      }
+    });
+  }
+  return { dist, prev };
+}
+
+function routeFromNearestEntryPoint(targetLat, targetLon) {
+  if (!galsanGraph || galsanEntryNodeIds.length === 0) return;
+
+  const targetIdx = galsanNearestNode(targetLat, targetLon);
+  if (targetIdx === -1) return;
+
+  const { dist, prev } = galsanDijkstraFromEntryPoints();
+  if (!isFinite(dist[targetIdx])) return;
+
+  const pathIdx = [];
+  let cur = targetIdx;
+  while (cur !== -1) { pathIdx.push(cur); cur = prev[cur]; }
+  pathIdx.reverse();
+
+  const latlngs = pathIdx.map(i => [galsanGraph.nodes[i].lat, galsanGraph.nodes[i].lon]);
+
+  if (galsanRouteLine) map.removeLayer(galsanRouteLine);
+  galsanRouteLine = L.polyline(latlngs, { color: "#0000ff", weight: 5, opacity: 0.9 }).addTo(map);
+}
+
 function setActiveCategories(selectedCategories){
   activeCategories = selectedCategories.filter(cat => patrolSchedules.hasOwnProperty(cat));
   updatePatrolDisplay();
@@ -476,6 +580,11 @@ function initMap(){
           const xml = parser.parseFromString(xmlText, "application/xml");
           if (xml.querySelector("parsererror")) return;
 
+          const isGalsanFile = url.includes("galsan_minimal.gpx");
+          if (isGalsanFile) {
+            galsanGraph = buildGalsanGraph(xml);
+          }
+
           const wpts = Array.from(xml.getElementsByTagName("wpt"));
 
           wpts.forEach(wpt => {
@@ -499,6 +608,10 @@ function initMap(){
               const entryMarker = L.marker([latNum, lonNum], { icon: entryIcon });
               entryMarker.bindTooltip(name, { direction: "top", offset: [0, -8] });
               entryMarker.addTo(entryPointLayerGroup);
+
+              if (isGalsanFile && galsanGraph) {
+                galsanEntryNodeIds.push(galsanNearestNode(latNum, lonNum));
+              }
               return;
             }
 
@@ -535,6 +648,11 @@ function initMap(){
               // 현재 마커 강조
               marker.setIcon(selectedIcon);
               lastClickedMarker = marker;
+
+              // ✅ 갈산공원 wpt면, 가장 가까운 진입기준점에서 트랙을 따라오는 경로를 파란선으로 표시
+              if (isGalsanFile) {
+                routeFromNearestEntryPoint(ll.lat, ll.lng);
+              }
             });
 
 
