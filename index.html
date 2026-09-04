@@ -68,6 +68,8 @@
     padding: 8px 10px;
     font-size: 13px;
     line-height: 1.5;
+    max-height: 45vh;
+    overflow-y: auto;
     box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
   }
 </style>
@@ -156,16 +158,30 @@ let galsanGraph = null;        // { nodes: [{lat,lon}], adj: [[{to,dist}]] } —
 let galsanEntryNodeIds = [];   // 진입기준점 wpt와 대응하는 galsanGraph 노드 인덱스들
 let galsanRouteLines = [];     // 현재 표시 중인 경로 폴리라인들(외곽선 포함)
 
-// 가까운 순서대로 몇 개의 진입경로를 표시할지
-const GALSAN_ROUTE_COUNT = 3;
-// 순위별 색상 (시인성 우선: 배경(회색 도로/초록 공원/빨강 기존 트랙)과 겹치지 않는 채도 높은 색)
-const GALSAN_ROUTE_COLORS = [
-  { color: "#0a52ff", label: "1순위(가장 가까움)" }, // 파랑
-  { color: "#ff2d95", label: "2순위" },             // 마젠타
-  { color: "#ff8c00", label: "3순위" },             // 주황
-  { color: "#9c27b0", label: "4순위" },             // 보라
-  { color: "#00bcd4", label: "5순위" },             // 청록
+// 도달 가능한 모든 진입기준점의 경로를 표시 (안전 상한선만 둠)
+const GALSAN_ROUTE_MAX = 30;
+// 순위별 색상 팔레트 (시인성 우선: 배경 회색 도로/초록 공원/빨강 기존 트랙과 안 겹치는 채도 높은 색)
+const GALSAN_ROUTE_PALETTE = [
+  "#0a52ff", // 파랑
+  "#ff2d95", // 마젠타
+  "#ff8c00", // 주황
+  "#8e44ad", // 보라
+  "#00bcd4", // 청록
+  "#e74c3c", // 빨강(진한 톤)
+  "#1e8449", // 진초록
+  "#b7950b", // 황토
+  "#34495e", // 짙은 남색
+  "#ff5cc6", // 연분홍
 ];
+// 팔레트를 넘어서면 황금각(137.5°)으로 계속 다른 색을 생성
+function galsanRouteColor(rank) {
+  if (rank < GALSAN_ROUTE_PALETTE.length) return GALSAN_ROUTE_PALETTE[rank];
+  const hue = Math.round((rank * 137.508) % 360);
+  return `hsl(${hue}, 85%, 45%)`;
+}
+function galsanRouteLabel(rank) {
+  return rank === 0 ? "1순위(가장 가까움)" : `${rank + 1}순위`;
+}
 
 // 같은 교차로가 GPS 오차로 살짝 다르게 찍힌 경우만 "같은 지점"으로 봄 (이 이상은 서로 다른 길일 수 있어 연결하지 않음)
 const GALSAN_TIGHT_SNAP_METERS = 6;
@@ -301,7 +317,7 @@ function routeFromNearestEntryPoints(targetLat, targetLon) {
   });
   ranked.sort((a, b) => a.meters - b.meters);
 
-  const chosen = ranked.slice(0, GALSAN_ROUTE_COUNT).map((entry, rank) => {
+  const chosen = ranked.slice(0, GALSAN_ROUTE_MAX).map((entry, rank) => {
     const pathIdx = [];
     let cur = entry.nid;
     let guard = 0;
@@ -310,8 +326,7 @@ function routeFromNearestEntryPoints(targetLat, targetLon) {
       cur = prev[cur];
     }
     const latlngs = pathIdx.map(i => [galsanGraph.nodes[i].lat, galsanGraph.nodes[i].lon]);
-    const style = GALSAN_ROUTE_COLORS[rank] || GALSAN_ROUTE_COLORS[GALSAN_ROUTE_COLORS.length - 1];
-    return { latlngs, style, rank, meters: entry.meters };
+    return { latlngs, color: galsanRouteColor(rank), label: galsanRouteLabel(rank), rank, meters: entry.meters };
   }).filter(r => r.latlngs.length >= 2);
 
   if (chosen.length === 0) return;
@@ -326,9 +341,9 @@ function routeFromNearestEntryPoints(targetLat, targetLon) {
   // 2) 색상 경로는 낮은 순위 → 높은 순위로 올려 1순위가 맨 위에 오게
   chosen.slice().reverse().forEach(r => {
     const line = L.polyline(r.latlngs, {
-      color: r.style.color, weight: 5, opacity: 0.95, lineCap: "round", lineJoin: "round"
+      color: r.color, weight: 5, opacity: 0.95, lineCap: "round", lineJoin: "round"
     }).addTo(map);
-    line.bindTooltip(`${r.style.label} · 약 ${Math.round(r.meters)}m`, { sticky: true });
+    line.bindTooltip(`${r.label} · 약 ${Math.round(r.meters)}m`, { sticky: true });
     galsanRouteLines.push(line);
   });
 
@@ -336,11 +351,11 @@ function routeFromNearestEntryPoints(targetLat, targetLon) {
   const legend = document.getElementById("routeLegend");
   if (legend) {
     legend.innerHTML =
-      '<div style="font-weight:bold;margin-bottom:4px;">진입 경로</div>' +
+      `<div style="font-weight:bold;margin-bottom:4px;">진입 경로 (${chosen.length}곳)</div>` +
       chosen.map(r =>
         `<div style="display:flex;align-items:center;gap:6px;">
-           <span style="width:18px;height:4px;background:${r.style.color};display:inline-block;border-radius:2px;"></span>
-           <span>${r.style.label} · 약 ${Math.round(r.meters)}m</span>
+           <span style="width:18px;height:4px;background:${r.color};display:inline-block;border-radius:2px;"></span>
+           <span>${r.label} · 약 ${Math.round(r.meters)}m</span>
          </div>`
       ).join("");
     legend.style.display = "block";
