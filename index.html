@@ -55,6 +55,21 @@
   body.panel-hidden #showPanelBtn {
     display: block;
   }
+
+  #routeLegend {
+    display: none;
+    position: fixed;
+    left: 10px;
+    bottom: 16px;
+    z-index: 10000;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid #007bff;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
+  }
 </style>
 <script src="lampData.js"></script>
 <script src="patrolSchedule.js"></script>
@@ -107,6 +122,7 @@
 </div>
   
 <div id="map"></div>
+<div id="routeLegend"></div>
 
 <script>
 let activeCategories = ["안전조치"];
@@ -135,10 +151,21 @@ let gpxNewWptIndex = [];   // ✅ 검색/색변화는 이 인덱스만 사용
 // ✅ [진입기준점] wpt 전용: 도로 진입 기준점을 항상 지도에 표시
 let entryPointLayerGroup;
 
-// ✅ 갈산공원 wpt 클릭 시 "가장 가까운 진입기준점 → 클릭한 wpt" 트랙 경로를 파란선으로 표시
+// ✅ 갈산공원 wpt 클릭 시 "가까운 진입기준점들 → 클릭한 wpt" 트랙 경로를 여러 색으로 표시
 let galsanGraph = null;        // { nodes: [{lat,lon}], adj: [[{to,dist}]] } — trkpt 기반 경로망
 let galsanEntryNodeIds = [];   // 진입기준점 wpt와 대응하는 galsanGraph 노드 인덱스들
-let galsanRouteLine = null;    // 현재 표시 중인 경로 폴리라인
+let galsanRouteLines = [];     // 현재 표시 중인 경로 폴리라인들(외곽선 포함)
+
+// 가까운 순서대로 몇 개의 진입경로를 표시할지
+const GALSAN_ROUTE_COUNT = 3;
+// 순위별 색상 (시인성 우선: 배경(회색 도로/초록 공원/빨강 기존 트랙)과 겹치지 않는 채도 높은 색)
+const GALSAN_ROUTE_COLORS = [
+  { color: "#0a52ff", label: "1순위(가장 가까움)" }, // 파랑
+  { color: "#ff2d95", label: "2순위" },             // 마젠타
+  { color: "#ff8c00", label: "3순위" },             // 주황
+  { color: "#9c27b0", label: "4순위" },             // 보라
+  { color: "#00bcd4", label: "5순위" },             // 청록
+];
 
 // 같은 교차로가 GPS 오차로 살짝 다르게 찍힌 경우만 "같은 지점"으로 봄 (이 이상은 서로 다른 길일 수 있어 연결하지 않음)
 const GALSAN_TIGHT_SNAP_METERS = 6;
@@ -221,12 +248,13 @@ function galsanNearestNode(lat, lon) {
   return best;
 }
 
-function galsanDijkstraFromEntryPoints() {
+// 한 노드(source)에서 그래프 전체까지의 최단거리/경로트리
+function galsanDijkstraFrom(sourceIdx) {
   const n = galsanGraph.nodes.length;
   const dist = new Array(n).fill(Infinity);
   const prev = new Array(n).fill(-1);
   const visited = new Array(n).fill(false);
-  galsanEntryNodeIds.forEach(s => { dist[s] = 0; });
+  dist[sourceIdx] = 0;
 
   for (let iter = 0; iter < n; iter++) {
     let u = -1, best = Infinity;
@@ -245,24 +273,83 @@ function galsanDijkstraFromEntryPoints() {
   return { dist, prev };
 }
 
-function routeFromNearestEntryPoint(targetLat, targetLon) {
+function clearGalsanRoutes() {
+  galsanRouteLines.forEach(l => { if (map.hasLayer(l)) map.removeLayer(l); });
+  galsanRouteLines = [];
+  const legend = document.getElementById("routeLegend");
+  if (legend) { legend.style.display = "none"; legend.innerHTML = ""; }
+}
+
+// 클릭한 wpt까지, 가까운 진입기준점부터 순서대로 여러 경로를 서로 다른 색으로 표시
+function routeFromNearestEntryPoints(targetLat, targetLon) {
+  clearGalsanRoutes();
   if (!galsanGraph || galsanEntryNodeIds.length === 0) return;
 
   const targetIdx = galsanNearestNode(targetLat, targetLon);
   if (targetIdx === -1) return;
 
-  const { dist, prev } = galsanDijkstraFromEntryPoints();
-  if (!isFinite(dist[targetIdx])) return;
+  // ✅ 클릭 지점에서 한 번만 Dijkstra → 모든 진입기준점까지의 트랙거리를 동시에 구함
+  const { dist, prev } = galsanDijkstraFrom(targetIdx);
 
-  const pathIdx = [];
-  let cur = targetIdx;
-  while (cur !== -1) { pathIdx.push(cur); cur = prev[cur]; }
-  pathIdx.reverse();
+  // 도달 가능한 진입기준점을 트랙거리 오름차순으로 정렬(같은 노드로 스냅된 경우 1개만)
+  const seen = new Set();
+  const ranked = [];
+  galsanEntryNodeIds.forEach(nid => {
+    if (nid < 0 || seen.has(nid) || !isFinite(dist[nid])) return;
+    seen.add(nid);
+    ranked.push({ nid, meters: dist[nid] });
+  });
+  ranked.sort((a, b) => a.meters - b.meters);
 
-  const latlngs = pathIdx.map(i => [galsanGraph.nodes[i].lat, galsanGraph.nodes[i].lon]);
+  const chosen = ranked.slice(0, GALSAN_ROUTE_COUNT).map((entry, rank) => {
+    const pathIdx = [];
+    let cur = entry.nid;
+    let guard = 0;
+    while (cur !== -1 && guard++ < galsanGraph.nodes.length + 5) {
+      pathIdx.push(cur);
+      cur = prev[cur];
+    }
+    const latlngs = pathIdx.map(i => [galsanGraph.nodes[i].lat, galsanGraph.nodes[i].lon]);
+    const style = GALSAN_ROUTE_COLORS[rank] || GALSAN_ROUTE_COLORS[GALSAN_ROUTE_COLORS.length - 1];
+    return { latlngs, style, rank, meters: entry.meters };
+  }).filter(r => r.latlngs.length >= 2);
 
-  if (galsanRouteLine) map.removeLayer(galsanRouteLine);
-  galsanRouteLine = L.polyline(latlngs, { color: "#0000ff", weight: 5, opacity: 0.9 }).addTo(map);
+  if (chosen.length === 0) return;
+
+  // 1) 흰색 외곽선을 먼저 전부 깔아 어떤 배경에서도 잘 보이게
+  chosen.forEach(r => {
+    galsanRouteLines.push(
+      L.polyline(r.latlngs, { color: "#ffffff", weight: 9, opacity: 0.9, lineCap: "round", lineJoin: "round" }).addTo(map)
+    );
+  });
+
+  // 2) 색상 경로는 낮은 순위 → 높은 순위로 올려 1순위가 맨 위에 오게
+  chosen.slice().reverse().forEach(r => {
+    const line = L.polyline(r.latlngs, {
+      color: r.style.color, weight: 5, opacity: 0.95, lineCap: "round", lineJoin: "round"
+    }).addTo(map);
+    line.bindTooltip(`${r.style.label} · 약 ${Math.round(r.meters)}m`, { sticky: true });
+    galsanRouteLines.push(line);
+  });
+
+  // 3) 범례 표시
+  const legend = document.getElementById("routeLegend");
+  if (legend) {
+    legend.innerHTML =
+      '<div style="font-weight:bold;margin-bottom:4px;">진입 경로</div>' +
+      chosen.map(r =>
+        `<div style="display:flex;align-items:center;gap:6px;">
+           <span style="width:18px;height:4px;background:${r.style.color};display:inline-block;border-radius:2px;"></span>
+           <span>${r.style.label} · 약 ${Math.round(r.meters)}m</span>
+         </div>`
+      ).join("");
+    legend.style.display = "block";
+  }
+
+  // 4) 모든 경로가 화면에 들어오도록 범위 조정(과도한 확대 방지)
+  const b = L.latLngBounds();
+  chosen.forEach(r => r.latlngs.forEach(ll => b.extend(ll)));
+  if (b.isValid()) map.fitBounds(b, { padding: [40, 40], maxZoom: 18 });
 }
 
 function setActiveCategories(selectedCategories){
@@ -675,9 +762,9 @@ function initMap(){
               marker.setIcon(selectedIcon);
               lastClickedMarker = marker;
 
-              // ✅ 갈산공원 wpt면, 가장 가까운 진입기준점에서 트랙을 따라오는 경로를 파란선으로 표시
+              // ✅ 갈산공원 wpt면, 가까운 진입기준점들에서 트랙을 따라오는 경로를 순위별 색으로 표시
               if (isGalsanFile) {
-                routeFromNearestEntryPoint(ll.lat, ll.lng);
+                routeFromNearestEntryPoints(ll.lat, ll.lng);
               }
             });
 
@@ -870,7 +957,7 @@ function searchAndShow() {
   map.fitBounds(bounds);
 }
 
-function resetSearch(){ searchMode=false; clearMarkers(); document.getElementById("keyword").value=""; lastClickedCoord=""; document.getElementById("clickedCoords").innerText="📍"; resetGpxWptHighlight(); }
+function resetSearch(){ searchMode=false; clearMarkers(); document.getElementById("keyword").value=""; lastClickedCoord=""; document.getElementById("clickedCoords").innerText="📍"; resetGpxWptHighlight(); clearGalsanRoutes(); }
 
 function navigateToPatrol() {
   if (!lastClickedCoord) {
