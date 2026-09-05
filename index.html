@@ -72,6 +72,22 @@
     overflow-y: auto;
     box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
   }
+  #routeLegend .rl-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: bold;
+    margin-bottom: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #routeLegend .rl-header .rl-caret { margin-left: auto; font-size: 11px; color: #007bff; }
+  #routeLegend.collapsed {
+    max-height: none;
+    overflow: visible;
+  }
+  #routeLegend.collapsed .rl-header { margin-bottom: 0; }
+  #routeLegend.collapsed .rl-body { display: none; }
 </style>
 <script src="lampData.js"></script>
 <script src="patrolSchedule.js"></script>
@@ -160,24 +176,27 @@ let galsanRouteLines = [];     // 현재 표시 중인 경로 폴리라인들(�
 
 // 도달 가능한 모든 진입기준점의 경로를 표시 (안전 상한선만 둠)
 const GALSAN_ROUTE_MAX = 30;
-// 순위별 색상 팔레트 (시인성 우선: 배경 회색 도로/초록 공원/빨강 기존 트랙과 안 겹치는 채도 높은 색)
+// 순위별 색상 팔레트
+// ⚠️ 기존 trk 선이 붉은색이므로, 붉은/주황 계열은 제외하고
+//    파랑·청록·보라·초록 등 한류(寒色) 위주로 골라 시인성을 확보한다.
 const GALSAN_ROUTE_PALETTE = [
   "#0a52ff", // 파랑
-  "#ff2d95", // 마젠타
-  "#ff8c00", // 주황
-  "#8e44ad", // 보라
   "#00bcd4", // 청록
-  "#e74c3c", // 빨강(진한 톤)
+  "#8e44ad", // 보라
   "#1e8449", // 진초록
-  "#b7950b", // 황토
-  "#34495e", // 짙은 남색
-  "#ff5cc6", // 연분홍
+  "#ff2d95", // 마젠타(붉은 트랙과 확실히 구분되는 핑크)
+  "#3949ab", // 남보라
+  "#00897b", // 틸
+  "#5e35b1", // 딥퍼플
+  "#0277bd", // 짙은 하늘
+  "#546e7a", // 청회색
 ];
 // 팔레트를 넘어서면 황금각(137.5°)으로 계속 다른 색을 생성
+// 단, 붉은색(0°)·주황색(~35°)을 피하기 위해 색상(hue)을 180~300° 범위(청록~보라)로 제한
 function galsanRouteColor(rank) {
   if (rank < GALSAN_ROUTE_PALETTE.length) return GALSAN_ROUTE_PALETTE[rank];
-  const hue = Math.round((rank * 137.508) % 360);
-  return `hsl(${hue}, 85%, 45%)`;
+  const hue = 180 + Math.round((rank * 137.508) % 120);
+  return `hsl(${hue}, 80%, 42%)`;
 }
 function galsanRouteLabel(rank) {
   return rank === 0 ? "1순위(가장 가까움)" : `${rank + 1}순위`;
@@ -350,14 +369,20 @@ function routeFromNearestEntryPoints(targetLat, targetLon) {
   // 3) 범례 표시
   const legend = document.getElementById("routeLegend");
   if (legend) {
+    const collapsed = legend.classList.contains("collapsed");
     legend.innerHTML =
-      `<div style="font-weight:bold;margin-bottom:4px;">진입 경로 (${chosen.length}곳)</div>` +
+      `<div class="rl-header" title="접기/펼치기">
+         <span>진입 경로 (${chosen.length}곳)</span>
+         <span class="rl-caret">${collapsed ? "▸ 펼치기" : "▾ 접기"}</span>
+       </div>` +
+      `<div class="rl-body">` +
       chosen.map(r =>
         `<div style="display:flex;align-items:center;gap:6px;">
            <span style="width:18px;height:4px;background:${r.color};display:inline-block;border-radius:2px;"></span>
            <span>${r.label} · 약 ${Math.round(r.meters)}m</span>
          </div>`
-      ).join("");
+      ).join("") +
+      `</div>`;
     legend.style.display = "block";
   }
 
@@ -1077,6 +1102,21 @@ document.addEventListener("DOMContentLoaded", ()=>{
   // ✅ 새로고침(자동 5분 새로고침 포함)에도 패널 숨김 상태 유지
   if(localStorage.getItem("panelHidden")==="1"){
     document.body.classList.add("panel-hidden");
+  }
+
+  // 📐 진입 경로 범례(좌측 하단) 접기/펼치기 — 헤더 클릭으로 토글, 상태 유지
+  const routeLegend = document.getElementById("routeLegend");
+  if(routeLegend){
+    if(localStorage.getItem("routeLegendCollapsed")==="1"){
+      routeLegend.classList.add("collapsed");
+    }
+    routeLegend.addEventListener("click", e=>{
+      if(!e.target.closest(".rl-header")) return;
+      const collapsed = routeLegend.classList.toggle("collapsed");
+      localStorage.setItem("routeLegendCollapsed", collapsed ? "1" : "0");
+      const caret = routeLegend.querySelector(".rl-caret");
+      if(caret) caret.textContent = collapsed ? "▸ 펼치기" : "▾ 접기";
+    });
   }
 
   initMap();
